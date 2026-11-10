@@ -1,1 +1,1 @@
-# MOKE_effect_Fresnel_Rotation_Simulation
+# MOKE_effect_Magnetometer
