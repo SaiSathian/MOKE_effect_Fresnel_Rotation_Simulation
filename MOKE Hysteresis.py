@@ -1,503 +1,788 @@
-#Part-1(Jathin)
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import expm
 
-c = 299792458.0
+# INPUTS
+# -------- Select material --------
+MATERIAL = "Fe"          # Options: "Fe", "Co"
 
-def compute_derived_constants(lam, theta_i_deg, n_inc=1.0):
-  """Computes angular frequency omega, vacuum wavenumber k0, and
+# -------- Optical parameters --------
+WAVELENGTH = 632.8e-9    # metres
+INCIDENCE_ANGLE = 5.0    # degrees
 
-  in-plane wavevector component kx.
+N_INCIDENT = 1.0         # Air
+N_SUBSTRATE = 1.515      # BK7 glass
 
-  Parameters:
-  - lam (float): Laser wavelength in meters (e.g., 633e-9 for 633 nm).
-  - theta_i_deg (float): Angle of incidence in degrees.
-  - n_inc (float): Refractive index of the incident medium (default is 1.0 for
-  air).
+# -------- Film thickness --------
+FILM_THICKNESS = 30e-9   # metres
 
-  Returns:
-  - dict: Contains omega, k0, and kx.
-  """
-  # Speed of light in vacuum (m/s)
-  c = 299792458.0
+# -------- Material database --------
+# Values must correspond to the selected wavelength
+MATERIALS = {
 
-  # Convert angle from degrees to radians
-  theta_i = np.radians(theta_i_deg)
+    "Fe": {
+        "n": 2.87,
+        "k": 3.36,
+        "Q": -0.0451 - 0.0229j
+    },
 
-  # 1. Angular frequency omega = 2 * pi * c / lambda
-  omega = (2.0 * np.pi * c) / lam
+    "Co": {
+        "n": None,       # Enter Co refractive-index data
+        "k": None,       # Enter Co extinction coefficient
+        "epsilon_d": -11.49 + 18.32j,
+        "Q": 0.0283 + 0.0066j
+    }
 
-  # 2. Vacuum wavenumber k0 = omega / c = 2 * pi / lambda
-  k0 = (2.0 * np.pi) / lam
+}
 
-  # 3. In-plane wavevector component kx = k0 * n_inc * sin(theta_i)
-  kx = k0 * n_inc * np.sin(theta_i)
+# -------- Load selected material --------
+material = MATERIALS[MATERIAL]
 
-  return {"omega": omega, "k0": k0, "kx": kx}
+if "epsilon_d" in material:
+    EPSILON_D = material["epsilon_d"]
+else:
+    n = material["n"]
+    k = material["k"]
+    EPSILON_D = (n + 1j*k)**2
 
-'''values = compute_derived_constants(633e-9, 45, 1)
-print(values["omega"],values["k0"],values['kx'])'''
+VOIGT_Q = material["Q"]
 
-def get_dielectric_tensor(epsilon_d, Q=None, m=None, is_magnetic=False):
-  """Builds the 3x3 dielectric tensor for a layer.
+# Magnetization direction
+# Polar MOKE: magnetization perpendicular to film surface
 
-  Parameters:
-  - epsilon_d (complex or float): Material optical constant (permittivity).
-  - Q (complex or float): Voigt magneto-optical parameter.
-  - m (tuple or list): Magnetization vector [mx, my, mz].
-  - is_magnetic (bool): True for magnetic layers, False for non-magnetic layers.
+MX = 0.0
+MY = 0.0
 
-  Returns:
-  - numpy.ndarray: 3x3 complex dielectric tensor.
-  """
-  if not is_magnetic or Q is None or m is None:
-    # For a non-magnetic layer, the tensor is just epsilon_d * I_3x3
-    return epsilon_d * np.eye(3, dtype=complex)
-  else:
-    mx, my, mz = m
-    # For a magnetic layer, construct the full tensor
+# Magnetic hysteresis parameters
+
+H_MIN = -5.0
+H_MAX = 5.0
+
+H_COERCIVE = 1.0             # Coercive field (model units)
+SWITCHING_WIDTH = 0.4        # Controls switching sharpness
+
+# Numerical resolution of graph
+
+N_POINTS = 2000              # Field points per hysteresis branch
+N_PHASE_POINTS = 1000        # Points for polarization ellipse
+N_AXIS_TICKS = 9             # Number of axis markings
+ellipse_x_gain = 20
+
+# Plot controls
+
+SHOW_MAGNETIZATION_LOOP = True
+SHOW_KERR_RESPONSE = True
+SHOW_KERR_ROTATION_LOOP = True
+SHOW_KERR_ELLIPTICITY_LOOP = True
+SHOW_POLARIZATION_ELLIPSES = True
+
+# Magnetic fields at which to show polarization ellipses
+POLARIZATION_FIELDS = [-5.0, 0.0, 5.0]
+
+# -------- Display selected inputs --------
+print("Selected material:", MATERIAL)
+print("Diagonal permittivity:", EPSILON_D)
+print("Voigt parameter:", VOIGT_Q)
+print("Film thickness:", FILM_THICKNESS)
+
+
+# PHYSICAL CONSTANTS AND DERIVED OPTICAL PARAMETERS
+
+C = 299792458.0              # Speed of light in vacuum (m/s)
+
+def compute_derived_constants(
+    wavelength,
+    incidence_angle_deg,
+    n_incident ):
+
+    theta_i = np.radians(incidence_angle_deg)
+    omega = 2.0 * np.pi * C / wavelength
+    k0 = 2.0 * np.pi / wavelength
+    kx = k0 * n_incident * np.sin(theta_i)
+    
+    return omega, k0, kx, theta_i
+
+omega, k0, kx, theta_i = compute_derived_constants(
+    WAVELENGTH,
+    INCIDENCE_ANGLE,
+    N_INCIDENT
+)
+
+
+
+# DIELECTRIC TENSOR
+
+def get_dielectric_tensor(
+    epsilon_d,
+    Q,
+    magnetization,
+    is_magnetic=True ):
+
+    if not is_magnetic:
+        return epsilon_d * np.eye(3, dtype=complex)
+
+    mx, my, mz = magnetization
+
     tensor_matrix = np.array(
         [
             [1.0, 1j * Q * mz, -1j * Q * my],
+
             [-1j * Q * mz, 1.0, 1j * Q * mx],
-            [1j * Q * my, -1j * Q * mx, 1.0],
+
+            [1j * Q * my, -1j * Q * mx, 1.0]
         ],
-        dtype=complex,
+        dtype=complex
     )
+
     return epsilon_d * tensor_matrix
 
-'''epsilon_d = -11.49 + 18.32j
-Q = 0.0283 + 0.0066j
-m = (0, 0, 1)
-eps = get_dielectric_tensor(epsilon_d, Q, m, is_magnetic=True)
-print("Dielectric tensor of Cobalt:")
-print(eps)
-print("\nOff-diagonal element epsilon_xy:")
-print(eps[0, 1])'''
 
-#Part-2(Athul)
 
-def berreman_matrix(eps,kx,k0):    #HERE THE DIELECTRIC TENSOR(eps) IS THE ONE CALCULATED FROM ABOVE
+# BERREMAN 4 x 4 MATRIX
 
-    xi  = kx/k0  #Normalized wavefn
+def berreman_matrix(eps, kx, k0):
 
+    xi = kx / k0
     eps = np.asarray(eps, dtype=complex)
-
-    # Extracting tensor components
+    
     exx, exy, exz = eps[0, 0], eps[0, 1], eps[0, 2]
     eyx, eyy, eyz = eps[1, 0], eps[1, 1], eps[1, 2]
     ezx, ezy, ezz = eps[2, 0], eps[2, 1], eps[2, 2]
 
+    row0 = [
+        -xi * ezx / ezz,
+        1.0 - xi**2 / ezz,
+        -xi * ezy / ezz,
+        0.0
+    ]
+    row1 = [
+        exx - exz * ezx / ezz,
+        -xi * exz / ezz,
+        exy - exz * ezy / ezz,
+        0.0
+    ]
+    row2 = [
+        0.0, 0.0, 0.0, 1.0
+    ]
+    row3 = [
+        eyx - eyz * ezx / ezz,
+        -xi * eyz / ezz,
+        eyy - eyz * ezy / ezz - xi**2,
+        0.0
+    ]
 
-    # Construct Delta matrix elements row by row
-    row0 = [-xi * ezx / ezz, 1.0 - (xi ** 2) / ezz, -xi * ezy / ezz, 0.0]
-    row1 = [exx - exz * ezx / ezz, -xi * exz/ezz, exy - exz * ezy / ezz, 0.0]
-    row2 = [0.0, 0.0, 0.0, 1.0]
-    row3 = [eyx - eyz * ezx / ezz, -xi * eyz/ezz, eyy - eyz * ezy / ezz - (xi ** 2), 0.0]
-
-    delta = np.array([row0, row1, row2, row3], dtype=complex)
-
-    return delta
-
-delta = berreman_matrix(eps, kx, k0)
-
-'''print("Normalized wavevector xi =", kx/k0)
-print("\nBerreman Matrix Delta:")
-np.set_printoptions(
-    precision=4,
-    suppress=True,
-    linewidth=120
-)
-print(delta)'''
-
-#Part-3
-import scipy
-from scipy.linalg import expm
-
-def Transfer_matrix(k0,d,delta):
-    return scipy.linalg.expm(1j * k0 * d * delta)  
-
-'''T = T_total(k0, d, delta)
-print("k0*d =", k0*d)
-print("Transfer matrix T:")
-print(np.round(T, 5))
-print("Shape:", T.shape)'''
-
-#Part-4(Rohith)
-
-n_inc = 1.0
-n_sub = 1.5
-theta_i_deg = 45
-lam = 633e-9
-d = 20e-9
-m = 0,0,1
-epsilon_d = -11.49+18.32j
-Q = 0.0283+0.0066j
-
-theta_i = np.radians(theta_i_deg)
-omega = (2.0 * np.pi * c) / lam
-k0 = (2.0 * np.pi) / lam
-kx = k0 * n_inc * np.sin(theta_i)
-
-eps = get_dielectric_tensor(epsilon_d, Q, m, is_magnetic=True)
-delta = berreman_matrix(eps,kx,k0)
-
-T_total = Transfer_matrix(k0,d,delta)
-
-theta_t = np.arcsin(n_inc * np.sin(theta_i) / n_sub)
-
-cos_i = np.cos(theta_i)
-cos_t = np.cos(theta_t)
-
-'''print("Incident angle:", np.degrees(theta_i))
-print("Transmission angle:", np.degrees(theta_t))
-print("cos(theta_i):", cos_i)
-print("cos(theta_t):", cos_t)'''
-
-
-L_inc = np.array([
-    [0, cos_i],
-    [0, n_inc],
-    [1, 0],
-    [n_inc * cos_i, 0]
-], dtype=complex)
-
-
-L_ref = np.array([
-    [0, -cos_i],
-    [0, n_inc],
-    [1, 0],
-    [-n_inc * cos_i, 0]
-], dtype=complex)
-
-
-L_trans = np.array([
-    [0, cos_t],
-    [0, n_sub],
-    [1, 0],
-    [n_sub * cos_t, 0]
-], dtype=complex)
-
-'''print("L_inc:\n", L_inc)
-print("L_ref:\n", L_ref)
-print("L_trans:\n", L_trans)
-
-print("Shapes:")
-print(L_inc.shape, L_ref.shape, L_trans.shape)'''
-
-T_Lref = T_total @ L_ref
-
-A = np.hstack((L_ref, -T_Lref))#
-
-incident_s = np.array([[1], [0]])
-b_s = -T_total @ L_inc @ incident_s
-x_s = np.linalg.solve(A, b_s)
-
-incident_p = np.array([[0], [1]])
-b_p = -T_total @ L_inc @ incident_p
-x_p = np.linalg.solve(A, b_p)
-
-r_ss = x_s[0, 0]
-r_ps = x_s[1, 0]
-r_sp = x_p[0, 0]
-r_pp = x_p[1, 0]
-
-R = np.array([
-    [r_ss, r_sp],
-    [r_ps, r_pp]
-])
-
-'''print("Matrix A:")
-print(A)
-print("\nSolution for incident s-polarization:")
-print(x_s)
-print("\nSolution for incident p-polarization:")
-print(x_p)
-print("\nReflection Matrix R:")
-print(R)
-print("\nBoundary residual for s:")
-print(np.linalg.norm(A @ x_s - b_s))
-print("\nBoundary residual for p:")
-print(np.linalg.norm(A @ x_p - b_p))'''
-
-# part 6 - complex Kerr ratio
-
-rho_K = r_sp / r_pp     # verify sign, depends on polarization of the incident light
-theta_K = np.real(rho_K)
-eta_K = np.imag(rho_K)
-
-theta_K_deg = np.degrees(theta_K)
-eta_K_deg = np.degrees(eta_K)
-
-'''print("Kerr rotation (rad):", theta_K)
-print("Kerr ellipticity (rad):", eta_K)
-print("Kerr rotation (deg):", theta_K_deg)
-print("Kerr ellipticity (deg):", eta_K_deg)'''
-
-import matplotlib.pyplot as plt
-
-def calculate_kerr(H_value):
-
-    # 1. Magnetization
-    mz_value = np.tanh(H_value / Hc)
-    m = (0, 0, mz_value)
-
-    # 2. Dielectric tensor
-    eps = get_dielectric_tensor(
-        epsilon_d, Q, m, is_magnetic=True
+    return np.array(
+        [row0, row1, row2, row3],
+        dtype=complex
     )
 
-    # 3. Berreman matrix
-    delta = berreman_matrix(eps, kx, k0)
 
-    # 4. Transfer matrix
-    T = expm(1j * k0 * d * delta)
 
-    # 5. Boundary-condition matrix
-    A = np.hstack((T @ L_ref, -L_trans))
+# TRANSFER MATRIX
 
-    # 6. p-polarized incident light
-    incident_p = np.array([[0], [1]])
+def compute_transfer_matrix(k0, thickness, delta):
 
-    b_p = -T @ L_inc @ incident_p
+    return expm(1j * k0 * thickness * delta)
 
-    x_p = np.linalg.solve(A, b_p)
 
-    # 7. Reflection coefficients
-    r_sp = x_p[0, 0]
-    r_pp = x_p[1, 0]
 
-    # 8. Complex Kerr ratio
-    rho = r_sp / r_pp
+# INCIDENT, REFLECTED AND TRANSMITTED FIELD MATRICES
 
-    a = np.real(rho)
-    b = np.imag(rho)
+def calculate_field_matrices(
+    theta_i,
+    n_incident,
+    n_substrate
+):
 
-    # 9. Kerr rotation and ellipticity
-    theta_K = 0.5 * np.arctan2(2*a, 1 - a**2 - b**2)
+    # Snell's law
 
-    eta_K = 0.5 * np.arcsin(2*b / (1 + a**2 + b**2))
+    sin_theta_t = (
+        n_incident * np.sin(theta_i) / n_substrate
+    )
 
-    return np.degrees(theta_K), np.degrees(eta_K)
+    theta_t = np.arcsin(sin_theta_t)
 
-H_values = np.linspace(-5, 5, 500)
+    cos_i = np.cos(theta_i)
 
-kerr_rotation = []
-kerr_ellipticity = []
+    cos_t = np.cos(theta_t)
 
-for H_value in H_values:
 
-    theta_K, eta_K = calculate_kerr(H_value)
+    # Incident field matrix
 
-    kerr_rotation.append(theta_K)
-    kerr_ellipticity.append(eta_K)
+    L_inc = np.array(
+        [
+            [0, cos_i],
+            [0, n_incident],
+            [1, 0],
+            [n_incident * cos_i, 0]
+        ],
+        dtype=complex
+    )
 
-kerr_rotation = np.array(kerr_rotation)
-kerr_ellipticity = np.array(kerr_ellipticity)
 
-plt.figure(figsize=(8, 5))
+    # Reflected field matrix
 
-plt.plot(H_values, kerr_rotation,
-         label="Kerr rotation")
+    L_ref = np.array(
+        [
+            [0, -cos_i],
+            [0, n_incident],
+            [1, 0],
+            [-n_incident * cos_i, 0]
+        ],
+        dtype=complex
+    )
 
-plt.plot(H_values, kerr_ellipticity,
-         label="Kerr ellipticity")
 
-plt.xlabel("Applied magnetic field H")
-plt.ylabel("Angle (degrees)")
-plt.title("Kerr rotation and ellipticity vs Magnetic Field")
+    # Transmitted field matrix
 
-plt.legend()
-plt.grid(True)
-plt.show()
+    L_trans = np.array(
+        [
+            [0, cos_t],
+            [0, n_substrate],
+            [1, 0],
+            [n_substrate * cos_t, 0]
+        ],
+        dtype=complex
+    )
 
-def get_reflected_field(H_value):
+    return L_inc, L_ref, L_trans, theta_t
 
-    # Magnetization
-    mz_value = np.tanh(H_value / Hc)
-    m = (0, 0, mz_value)
+
+L_inc, L_ref, L_trans, theta_t = calculate_field_matrices(
+    theta_i,
+    N_INCIDENT,
+    N_SUBSTRATE
+)
+
+
+# ==============================================================
+# 8. REFLECTION COEFFICIENT CALCULATION
+# ==============================================================
+
+def calculate_reflection(mz_value):
+
+    # Magnetization vector
+
+    magnetization = (
+        MX,
+        MY,
+        mz_value
+    )
+
 
     # Dielectric tensor
-    eps = get_dielectric_tensor(epsilon_d, Q, m, is_magnetic=True)
+
+    eps = get_dielectric_tensor(
+        EPSILON_D,
+        VOIGT_Q,
+        magnetization,
+        is_magnetic=True
+    )
+
 
     # Berreman matrix
-    delta = berreman_matrix(eps, kx, k0)
+
+    delta = berreman_matrix(
+        eps,
+        kx,
+        k0
+    )
+
 
     # Transfer matrix
-    T = expm(1j * k0 * d * delta)
 
-    # Boundary conditions
-    A = np.hstack((T @ L_ref, -L_trans))
+    T = compute_transfer_matrix(
+        k0,
+        FILM_THICKNESS,
+        delta
+    )
 
-    incident_p = np.array([[0], [1]])
+
+    # Boundary-condition matrix
+
+    A = np.hstack(
+        (
+            T @ L_ref,
+            -L_trans
+        )
+    )
+
+
+    # p-polarized incident light
+
+    incident_p = np.array(
+        [[0], [1]],
+        dtype=complex
+    )
+
     b_p = -T @ L_inc @ incident_p
+
+
+    # Solve boundary equations
 
     x_p = np.linalg.solve(A, b_p)
 
-    # Reflected components
+
+    # Reflected polarization amplitudes
+
     r_sp = x_p[0, 0]
+
     r_pp = x_p[1, 0]
+
 
     return r_sp, r_pp
 
-H_test = [-5, 0, 5]
 
-t = np.linspace(0, 2*np.pi, 1000)
-
-fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-
-for ax, H_value in zip(axes, H_test):
-
-    r_sp, r_pp = get_reflected_field(H_value)
-
-    E_s = np.real(r_sp * np.exp(1j*t))
-    E_p = np.real(r_pp * np.exp(1j*t))
-
-    ax.plot(E_s, E_p)
-
-    ax.set_title(f"H = {H_value}")
-    ax.set_xlabel("Reflected s component")
-    ax.set_ylabel("Reflected p component")
-
-    # Give the horizontal axis its own scale
-    x_max = max(np.max(np.abs(E_s)) * 1.2, 1e-8)
-    y_max = np.max(np.abs(E_p)) * 1.2
-
-    ax.set_xlim(-x_max, x_max)
-    ax.set_ylim(-y_max, y_max)
-
-    ax.grid(True)
-
-plt.tight_layout()
-plt.show()
-
-# Hysteresis parameters
-Hc_coercive = 1.0
-width = 0.4
-
-# Increasing field: -5 to +5
-H_up = np.linspace(-5, 5, 300)
-
-# Decreasing field: +5 to -5
-H_down = np.linspace(5, -5, 300)
-
-# Magnetization branches
-mz_up = np.tanh((H_up - Hc_coercive) / width)
-
-mz_down = np.tanh((H_down + Hc_coercive) / width)
-
-# Plot
-plt.figure(figsize=(8, 5))
-
-plt.plot(H_up, mz_up, label="Increasing field")
-plt.plot(H_down, mz_down, label="Decreasing field")
-
-plt.xlabel("Applied magnetic field H")
-plt.ylabel("Normalized magnetization mz")
-plt.title("Simulated Magnetic Hysteresis Loop")
-
-plt.legend()
-plt.grid(True)
-plt.show()
+# ==============================================================
+# 9. KERR ROTATION AND ELLIPTICITY
+# ==============================================================
 
 def calculate_kerr_from_mz(mz_value):
 
-    # 1. Magnetization vector
-    m = (0, 0, mz_value)
+    # Calculate reflected amplitudes
 
-    # 2. Dielectric tensor
-    eps = get_dielectric_tensor(
-        epsilon_d, Q, m, is_magnetic=True
-    )
+    r_sp, r_pp = calculate_reflection(mz_value)
 
-    # 3. Berreman matrix
-    delta = berreman_matrix(eps, kx, k0)
 
-    # 4. Transfer matrix
-    T = expm(1j * k0 * d * delta)
+    # Complex Kerr ratio
 
-    # 5. Boundary conditions
-    A = np.hstack((T @ L_ref, -L_trans))
-
-    # 6. p-polarized incident light
-    incident_p = np.array([[0], [1]])
-    b_p = -T @ L_inc @ incident_p
-
-    x_p = np.linalg.solve(A, b_p)
-
-    # 7. Reflection coefficients
-    r_sp = x_p[0, 0]
-    r_pp = x_p[1, 0]
-
-    # 8. Complex Kerr ratio
     rho = r_sp / r_pp
 
     a = np.real(rho)
+
     b = np.imag(rho)
 
-    # 9. Kerr rotation and ellipticity
+
+    # Kerr rotation
+
     theta_K = 0.5 * np.arctan2(
-        2*a, 1 - a**2 - b**2
+        2.0 * a,
+        1.0 - a**2 - b**2
     )
 
-    eta_K = 0.5 * np.arcsin(
-        2*b / (1 + a**2 + b**2)
+
+    # Kerr ellipticity
+
+    argument = (
+        2.0 * b / (1.0 + a**2 + b**2)
     )
 
-    return np.degrees(theta_K), np.degrees(eta_K)
+    # Protect against tiny floating-point overshoots
 
-# Increasing-field branch
-kerr_up = []
-ellipticity_up = []
+    argument = np.clip(argument, -1.0, 1.0)
 
-for mz_value in mz_up:
-
-    theta, eta = calculate_kerr_from_mz(mz_value)
-
-    kerr_up.append(theta)
-    ellipticity_up.append(eta)
+    eta_K = 0.5 * np.arcsin(argument)
 
 
-# Decreasing-field branch
-kerr_down = []
-ellipticity_down = []
-
-for mz_value in mz_down:
-
-    theta, eta = calculate_kerr_from_mz(mz_value)
-
-    kerr_down.append(theta)
-    ellipticity_down.append(eta)
+    return (
+        np.degrees(theta_K),
+        np.degrees(eta_K)
+    )
 
 
-# Convert to NumPy arrays
-kerr_up = np.array(kerr_up)
-kerr_down = np.array(kerr_down)
+# ==============================================================
+# 10. MAGNETIZATION HYSTERESIS MODEL
+# ==============================================================
 
-ellipticity_up = np.array(ellipticity_up)
-ellipticity_down = np.array(ellipticity_down)
+# Increasing magnetic field: negative to positive
 
-plt.figure(figsize=(8, 5))
+H_up = np.linspace(
+    H_MIN,
+    H_MAX,
+    N_POINTS
+)
 
-plt.plot(H_up, kerr_up, label="Increasing field")
-plt.plot(H_down, kerr_down, label="Decreasing field")
 
-plt.xlabel("Applied magnetic field H")
-plt.ylabel("Kerr rotation (degrees)")
-plt.title("Simulated MOKE Hysteresis Loop")
+# Decreasing magnetic field: positive to negative
 
-plt.legend()
-plt.grid(True)
-plt.show()
+H_down = np.linspace(
+    H_MAX,
+    H_MIN,
+    N_POINTS
+)
 
-plt.figure(figsize=(8, 5))
 
-plt.plot(H_up, ellipticity_up, label="Increasing field")
-plt.plot(H_down, ellipticity_down, label="Decreasing field")
+# Magnetization during increasing field
 
-plt.xlabel("Applied magnetic field H")
-plt.ylabel("Kerr ellipticity (degrees)")
-plt.title("Kerr Ellipticity Hysteresis Loop")
+mz_up = np.tanh(
+    (H_up - H_COERCIVE) / SWITCHING_WIDTH
+)
 
-plt.legend()
-plt.grid(True)
-plt.show()
+
+# Magnetization during decreasing field
+
+mz_down = np.tanh(
+    (H_down + H_COERCIVE) / SWITCHING_WIDTH
+)
+
+
+# ==============================================================
+# 11. CALCULATE KERR RESPONSE FOR BOTH BRANCHES
+# ==============================================================
+
+def calculate_branch_kerr(magnetization):
+
+    rotation = []
+
+    ellipticity = []
+
+    for mz_value in magnetization:
+
+        theta, eta = calculate_kerr_from_mz(
+            mz_value
+        )
+
+        rotation.append(theta)
+
+        ellipticity.append(eta)
+
+
+    return (
+        np.array(rotation),
+        np.array(ellipticity)
+    )
+
+
+# Increasing-field optical response
+
+kerr_up, ellipticity_up = calculate_branch_kerr(
+    mz_up
+)
+
+
+# Decreasing-field optical response
+
+kerr_down, ellipticity_down = calculate_branch_kerr(
+    mz_down
+)
+
+
+# ==============================================================
+# 12. GENERAL HYSTERESIS PLOTTING FUNCTION
+# ==============================================================
+
+def plot_hysteresis(
+    H_up,
+    H_down,
+    y_up,
+    y_down,
+    title,
+    ylabel,
+    y_limit
+):
+
+    fig, ax = plt.subplots(
+        figsize=(8, 5)
+    )
+
+    ax.plot(
+        H_up,
+        y_up,
+        label="Increasing field"
+    )
+
+    ax.plot(
+        H_down,
+        y_down,
+        label="Decreasing field"
+    )
+
+
+    # Fixed axis limits for comparison
+
+    ax.set_xlim(H_MIN, H_MAX)
+
+    ax.set_ylim(-y_limit, y_limit)
+
+
+    # Axis markings
+
+    ax.set_xticks(
+        np.linspace(
+            H_MIN,
+            H_MAX,
+            N_AXIS_TICKS
+        )
+    )
+
+    ax.set_yticks(
+        np.linspace(
+            -y_limit,
+            y_limit,
+            N_AXIS_TICKS
+        )
+    )
+
+
+    ax.set_xlabel("Applied magnetic field H")
+
+    ax.set_ylabel(ylabel)
+
+    ax.set_title(title)
+
+    ax.legend()
+
+    ax.grid(True)
+
+    plt.tight_layout()
+
+    plt.show()
+
+
+# ==============================================================
+# 13. GRAPH 1: MAGNETIC HYSTERESIS LOOP
+# ==============================================================
+
+if SHOW_MAGNETIZATION_LOOP:
+
+    plot_hysteresis(
+        H_up,
+        H_down,
+        mz_up,
+        mz_down,
+        "Magnetic Hysteresis Loop",
+        "Normalized magnetization mz",
+        1.1
+    )
+
+
+# ==============================================================
+# 14. GRAPH 2: KERR ROTATION AND ELLIPTICITY VS FIELD
+# ==============================================================
+
+if SHOW_KERR_RESPONSE:
+
+    fig, ax = plt.subplots(
+        figsize=(8, 5)
+    )
+
+    ax.plot(
+        H_up,
+        kerr_up,
+        label="Kerr rotation"
+    )
+
+    ax.plot(
+        H_up,
+        ellipticity_up,
+        label="Kerr ellipticity"
+    )
+
+    ax.set_xlim(H_MIN, H_MAX)
+
+    ax.set_xlabel("Applied magnetic field H")
+
+    ax.set_ylabel("Angle (degrees)")
+
+    ax.set_title(
+        "Kerr Rotation and Ellipticity vs Magnetic Field"
+    )
+
+    ax.legend()
+
+    ax.grid(True)
+
+    plt.tight_layout()
+
+    plt.show()
+
+
+# ==============================================================
+# 15. GRAPH 3: KERR ROTATION HYSTERESIS LOOP
+# ==============================================================
+
+if SHOW_KERR_ROTATION_LOOP:
+
+    rotation_limit = 1.1 * max(
+        np.max(np.abs(kerr_up)),
+        np.max(np.abs(kerr_down))
+    )
+
+    plot_hysteresis(
+        H_up,
+        H_down,
+        kerr_up,
+        kerr_down,
+        "MOKE Kerr Rotation Hysteresis Loop",
+        "Kerr rotation (degrees)",
+        rotation_limit
+    )
+
+
+# ==============================================================
+# 16. GRAPH 4: KERR ELLIPTICITY HYSTERESIS LOOP
+# ==============================================================
+
+if SHOW_KERR_ELLIPTICITY_LOOP:
+
+    ellipticity_limit = 1.1 * max(
+        np.max(np.abs(ellipticity_up)),
+        np.max(np.abs(ellipticity_down))
+    )
+
+    plot_hysteresis(
+        H_up,
+        H_down,
+        ellipticity_up,
+        ellipticity_down,
+        "Kerr Ellipticity Hysteresis Loop",
+        "Kerr ellipticity (degrees)",
+        ellipticity_limit
+    )
+
+
+# ==============================================================
+# 17. REFLECTED POLARIZATION ELLIPSE
+# ==============================================================
+
+def get_reflected_field(mz_value):
+
+    return calculate_reflection(mz_value)
+
+
+if SHOW_POLARIZATION_ELLIPSES:
+
+    t = np.linspace(
+        0,
+        2.0 * np.pi,
+        N_PHASE_POINTS
+    )
+
+
+    fig, axes = plt.subplots(
+        1,
+        len(POLARIZATION_FIELDS),
+        figsize=(5 * len(POLARIZATION_FIELDS), 5)
+    )
+
+    # Handle the case of only one selected field
+
+    axes = np.atleast_1d(axes)
+
+
+    for ax, H_value in zip(
+        axes,
+        POLARIZATION_FIELDS
+    ):
+
+        # Use the reversible magnetization model
+        # for these selected-field illustrations
+
+        mz_value = np.tanh(
+            H_value / max(SWITCHING_WIDTH, 1e-12)
+        )
+
+        r_sp, r_pp = get_reflected_field(
+            mz_value
+        )
+
+
+        # Time-varying reflected electric-field components
+
+        E_s = np.real(
+            r_sp * np.exp(1j * t)
+        )
+
+        E_p = np.real(
+            r_pp * np.exp(1j * t)
+        )
+
+
+        ax.plot(
+            ellipse_x_gain * E_s,
+            E_p
+        )
+
+        ax.set_title(
+            f"H = {H_value:g}"
+        )
+
+        ax.set_xlabel(
+            "Magnified Reflected s component"
+        )
+
+        ax.set_ylabel(
+            "Reflected p component"
+        )
+
+        ax.grid(True)
+
+        # Equal scaling is necessary to see the true ellipse shape
+
+        max_amplitude = max(
+            np.max(np.abs(E_s)),
+            np.max(np.abs(E_p)),
+            1e-8
+        )
+
+        ax.set_xlim(-0.08, 0.08)
+
+        ax.set_ylim(-0.80, 0.80)
+
+        ax.set_aspect(
+            "equal",
+            adjustable="box"
+        )
+        ax.set_xticks(np.linspace(-0.20, 0.20, 5))
+        ax.set_yticks(np.linspace(-0.80, 0.80, 9))
+
+
+    plt.tight_layout()
+
+    plt.show()
+
+def calculate_ellipse_angle(H_value):
+
+    theta, eta = calculate_kerr(H_value)
+
+    # Get the reflection matrix at this magnetic field
+    R = calculate_reflection_matrix(H_value)
+
+    # Reflected components for s-polarized incident light
+    Es = R[0, 0]
+    Ep = R[1, 0]
+
+    # Calculate ellipse orientation
+    alpha = 0.5 * np.arctan2(
+        2 * np.real(Es * np.conj(Ep)),
+        abs(Es)**2 - abs(Ep)**2
+    )
+
+    return np.degrees(alpha)
+
+# ==============================================================
+# 18. PRINT SIMULATION SUMMARY
+# ==============================================================
+
+print("\n========== MOKE SIMULATION SUMMARY ==========")
+
+print(f"Wavelength             : {WAVELENGTH * 1e9:.2f} nm")
+
+print(f"Incidence angle        : {INCIDENCE_ANGLE:.2f} degrees")
+
+print(f"Film thickness         : {FILM_THICKNESS * 1e9:.2f} nm")
+
+print(f"Substrate index        : {N_SUBSTRATE}")
+
+print(f"Coercive field         : {H_COERCIVE}")
+
+print(f"Switching width        : {SWITCHING_WIDTH}")
+
+print(f"Field samples/branch   : {N_POINTS}")
+
+
+print("\n--- Saturated Kerr response ---")
+
+print(
+    f"Increasing branch, positive saturation: "
+    f"\nRotation = {kerr_up[-1]:.6f} degrees, "
+    f"\nEllipticity = {ellipticity_up[-1]:.6f} degrees"
+)
+
+print(
+    f"Decreasing branch, negative saturation: "
+    f"\nRotation = {kerr_down[-1]:.6f} degrees, "
+    f"\nEllipticity = {ellipticity_down[-1]:.6f} degrees"
+)
+
+print("\nSimulation completed.")
